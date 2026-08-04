@@ -8,11 +8,11 @@ import type { MovieSummary } from '../types/movie';
 function buildChoiceLabel(choice: ChoiceOption) {
   switch (choice) {
     case ChoiceOption.MOVIE_A:
-      return 'Choose Movie A';
+      return 'Choose Left';
     case ChoiceOption.MOVIE_B:
-      return 'Choose Movie B';
+      return 'Choose Right';
     default:
-      return "I haven't watched either";
+      return "Never watched either";
   }
 }
 
@@ -58,7 +58,7 @@ export default function MovieDuelClient() {
         movieB: movieB.id,
         choice,
       });
-      setFeedback(`Vote recorded (${buildChoiceLabel(choice)}). Loading new pair...`);
+      setFeedback(`${buildChoiceLabel(choice)} recorded. Loading new pair...`);
       await loadPair();
     } catch (errorValue) {
       const message = errorValue instanceof Error ? errorValue.message : 'Unable to submit vote';
@@ -68,6 +68,21 @@ export default function MovieDuelClient() {
 
   return (
     <div className="space-y-6">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="rounded-3xl border border-white/10 bg-slate-900/80 p-5 text-slate-300 shadow-lg shadow-slate-950/30">
+          <p className="text-sm uppercase tracking-[0.28em] text-violet-300">Taste profile progress</p>
+          <div className="mt-3 h-3 overflow-hidden rounded-full bg-slate-800">
+            <div className="h-full w-12/12 bg-gradient-to-r from-fuchsia-500 via-violet-500 to-sky-500" />
+          </div>
+        </div>
+        <div className="rounded-3xl border border-white/10 bg-slate-900/80 p-5 shadow-lg shadow-slate-950/30">
+          <p className="text-sm uppercase tracking-[0.28em] text-slate-300">Hint</p>
+          <p className="mt-3 text-sm leading-7 text-slate-400">
+            Use left / right buttons or keyboard shortcuts to speed through duels.
+          </p>
+        </div>
+      </div>
+
       {loading && (
         <div className="rounded-3xl border border-slate-800 bg-slate-900/90 p-6 text-slate-300">
           Loading movie pair...
@@ -108,27 +123,27 @@ export default function MovieDuelClient() {
       <div className="grid gap-4 sm:grid-cols-3">
         <button
           type="button"
-          className="rounded-3xl bg-slate-800 px-5 py-4 text-left text-white transition hover:bg-slate-700"
+          className="rounded-3xl bg-gradient-to-r from-violet-500 to-sky-500 px-6 py-4 text-white shadow-lg shadow-violet-500/20 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={() => handleVote(ChoiceOption.MOVIE_A)}
           disabled={loading}
         >
-          Choose Movie A
+          Choose Left
         </button>
         <button
           type="button"
-          className="rounded-3xl bg-slate-800 px-5 py-4 text-left text-white transition hover:bg-slate-700"
-          onClick={() => handleVote(ChoiceOption.MOVIE_B)}
-          disabled={loading}
-        >
-          Choose Movie B
-        </button>
-        <button
-          type="button"
-          className="rounded-3xl bg-slate-800 px-5 py-4 text-left text-white transition hover:bg-slate-700"
+          className="rounded-3xl bg-gradient-to-r from-slate-700 via-slate-800 to-slate-700 px-6 py-4 text-white shadow-lg shadow-slate-950/20 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
           onClick={() => handleVote(ChoiceOption.NONE)}
           disabled={loading}
         >
-          I haven't watched either
+          Never watched either
+        </button>
+        <button
+          type="button"
+          className="rounded-3xl bg-gradient-to-r from-fuchsia-500 to-violet-500 px-6 py-4 text-white shadow-lg shadow-fuchsia-500/20 transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => handleVote(ChoiceOption.MOVIE_B)}
+          disabled={loading}
+        >
+          Choose Right
         </button>
       </div>
     </div>

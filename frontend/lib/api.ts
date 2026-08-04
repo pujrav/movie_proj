@@ -8,11 +8,13 @@ export interface RandomPairResponse {
   movieB: MovieSummary;
 }
 
+/* eslint-disable no-unused-vars */
 export enum ChoiceOption {
   MOVIE_A = "movieA",
   MOVIE_B = "movieB",
   NONE = "none",
 }
+/* eslint-enable no-unused-vars */
 
 export interface VotePayload {
   movieA: number;
