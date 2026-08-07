@@ -1,88 +1,191 @@
+from __future__ import annotations
+
 import random
+import os
+from pathlib import Path
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
+from dotenv import load_dotenv
+from sqlalchemy.orm import Session
 
+from backend.database import MovieRecord, VoteRecord, get_db
 from backend.models import MoviePairResponse, MovieSummary, VoteRequest, VoteResponse
+
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 router = APIRouter(prefix="/movies", tags=["movies"])
 
-# Mock movie data used for Phase 1. Later we will replace this with TMDB integration.
-MOCK_MOVIES: List[MovieSummary] = [
-    MovieSummary(
-        id=1,
-        tmdb_id=299534,
-        title="Avengers: Endgame",
-        genres=["Action", "Adventure", "Sci-Fi"],
-        poster_url="https://image.tmdb.org/t/p/w500/or06FN3Dka5tukK1e9sl16pB3iy.jpg",
-        overview="After the devastating events of Avengers: Infinity War, the universe is in ruins.",
-        rating=8.3,
-        release_year=2019,
-    ),
-    MovieSummary(
-        id=2,
-        tmdb_id=550,
-        title="Fight Club",
-        genres=["Drama"],
-        poster_url="https://image.tmdb.org/t/p/w500/bptfVGEQuv6vDTIMVCHjJ9Dz8PX.jpg",
-        overview="An insomniac office worker and a devil-may-care soap maker form an underground fight club.",
-        rating=8.4,
-        release_year=1999,
-    ),
-    MovieSummary(
-        id=3,
-        tmdb_id=157336,
-        title="Interstellar",
-        genres=["Adventure", "Drama", "Sci-Fi"],
-        poster_url="https://image.tmdb.org/t/p/w500/rAiYTfKGqDCRIIqo664sY9XZIvQ.jpg",
-        overview="A team of explorers travel through a wormhole in space in an attempt to ensure humanity's survival.",
-        rating=8.6,
-        release_year=2014,
-    ),
-    MovieSummary(
-        id=4,
-        tmdb_id=24428,
-        title="The Avengers",
-        genres=["Action", "Adventure", "Sci-Fi"],
-        poster_url="https://image.tmdb.org/t/p/w500/RYMX2wcKCBAr24UyPD7xwmjaTn.jpg",
-        overview="Earth's mightiest heroes must come together and learn to fight as a team.",
-        rating=8.0,
-        release_year=2012,
-    ),
-]
-
-# In-memory storage for Phase 1 vote tracking.
-_votes: List[dict] = []
-_vote_counter = 1
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+TMDB_BASE_URL = os.getenv("TMDB_BASE_URL", "https://api.themoviedb.org/3")
+TMDB_IMAGE_BASE = os.getenv("TMDB_IMAGE_BASE", "https://image.tmdb.org/t/p/w500")
 
 
-def _get_random_movie_pair() -> MoviePairResponse:
-    first, second = random.sample(MOCK_MOVIES, 2)
-    return MoviePairResponse(movieA=first, movieB=second)
+def _movie_record_to_summary(record: MovieRecord) -> MovieSummary:
+    """Convert a persisted MovieRecord row into the API's MovieSummary model."""
+    return MovieSummary(
+        id=record.id,
+        tmdb_id=record.tmdb_id,
+        title=record.title,
+        genres=record.genres.split(","),
+        poster_url=record.poster_url,
+        overview=record.overview,
+        rating=record.rating,
+        release_year=record.release_year,
+    )
+
+
+def _parse_tmdb_movie(raw: dict) -> dict | None:
+    """Convert a raw TMDB movie dict into fields for a MovieRecord row.
+    Returns None if essential fields are missing."""
+    try:
+        poster = raw.get("poster_path")
+        if not poster:
+            return None  # skip movies without posters
+
+        release_year = int(raw.get("release_date", "0000")[:4])
+        if release_year == 0:
+            return None
+
+        genres = raw.get("genre_ids", [])
+        # TMDB returns genre IDs in list endpoint — map to names
+        genre_map = {
+            28: "Action", 12: "Adventure", 16: "Animation",
+            35: "Comedy", 80: "Crime", 99: "Documentary",
+            18: "Drama", 10751: "Family", 14: "Fantasy",
+            36: "History", 27: "Horror", 10402: "Music",
+            9648: "Mystery", 10749: "Romance", 878: "Sci-Fi",
+            10770: "TV Movie", 53: "Thriller", 10752: "War",
+            37: "Western"
+        }
+        genre_names = [genre_map.get(g, "Other") for g in genres] or ["Other"]
+
+        return dict(
+            tmdb_id=raw["id"],
+            title=raw["title"],
+            genres=",".join(genre_names),
+            poster_url=f"{TMDB_IMAGE_BASE}{poster}",
+            overview=raw.get("overview", "No overview available."),
+            rating=round(raw.get("vote_average", 0.0), 1),
+            release_year=release_year,
+        )
+    except (KeyError, ValueError, TypeError):
+        return None
+
+
+async def _fetch_tmdb_movies() -> List[dict]:
+    """Fetch popular movies from TMDB and return as a list of MovieRecord field dicts.
+    Pulls 3 pages (~60 movies) for a good duel pool."""
+    if not TMDB_API_KEY:
+        raise HTTPException(
+            status_code=500,
+            detail="TMDB_API_KEY not configured. Check your .env file."
+        )
+
+    movies: List[dict] = []
+    async with httpx.AsyncClient() as client:
+        for page in range(1, 4):  # pages 1, 2, 3 = ~60 movies
+            response = await client.get(
+                f"{TMDB_BASE_URL}/movie/popular",
+                params={
+                    "api_key": TMDB_API_KEY,
+                    "language": "en-US",
+                    "page": page,
+                },
+                timeout=10.0,
+            )
+            if response.status_code != 200:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"TMDB API error: {response.status_code}"
+                )
+
+            results = response.json().get("results", [])
+            for raw in results:
+                movie = _parse_tmdb_movie(raw)
+                if movie:
+                    movies.append(movie)
+
+    return movies
+
+
+async def _refresh_movie_cache(db: Session) -> List[MovieRecord]:
+    """Force a fresh pull from TMDB, replacing the persisted movie cache."""
+    movies = await _fetch_tmdb_movies()
+
+    db.query(MovieRecord).delete()
+    db.add_all(MovieRecord(**fields) for fields in movies)
+    db.commit()
+
+    return db.query(MovieRecord).all()
+
+
+async def _get_or_refresh_cache(db: Session) -> List[MovieRecord]:
+    """Return the persisted movie cache, populating it from TMDB if empty."""
+    records = db.query(MovieRecord).all()
+    if not records:
+        records = await _refresh_movie_cache(db)
+    return records
 
 
 @router.get("/random-pair", response_model=MoviePairResponse)
-def get_random_pair():
-    """Return two distinct movies for the Movie Duel exercise."""
-    return _get_random_movie_pair()
+async def get_random_pair(db: Session = Depends(get_db)):
+    """Return two distinct movies from TMDB for the Movie Duel."""
+    records = await _get_or_refresh_cache(db)
+    if len(records) < 2:
+        raise HTTPException(
+            status_code=500,
+            detail="Not enough movies available. Check TMDB connection."
+        )
+    first, second = random.sample(records, 2)
+    return MoviePairResponse(
+        movieA=_movie_record_to_summary(first),
+        movieB=_movie_record_to_summary(second),
+    )
+
+
+@router.get("/refresh-cache")
+async def refresh_cache(db: Session = Depends(get_db)):
+    """Force a fresh fetch from TMDB. Useful during development."""
+    records = await _refresh_movie_cache(db)
+    return {"message": f"Cache refreshed. {len(records)} movies loaded."}
 
 
 @router.post("/vote", response_model=VoteResponse)
-def submit_vote(payload: VoteRequest):
-    """Store the user's vote for a movie pair and return a lightweight acknowledgement."""
-    global _vote_counter
+async def submit_vote(payload: VoteRequest, db: Session = Depends(get_db)):
+    """Store the user's vote and return acknowledgement."""
+    records = await _get_or_refresh_cache(db)
+    movie_ids = {record.id for record in records}
 
-    movie_ids = {movie.id for movie in MOCK_MOVIES}
     if payload.movieA not in movie_ids or payload.movieB not in movie_ids:
         raise HTTPException(status_code=400, detail="Invalid movie ids provided")
 
-    vote_record = {
-        "id": _vote_counter,
-        "movieA": payload.movieA,
-        "movieB": payload.movieB,
-        "choice": payload.choice.value,
-    }
-    _votes.append(vote_record)
-    _vote_counter += 1
+    vote = VoteRecord(
+        movie_a_id=payload.movieA,
+        movie_b_id=payload.movieB,
+        choice=payload.choice.value,
+    )
+    db.add(vote)
+    db.commit()
+    db.refresh(vote)
 
-    return VoteResponse(success=True, vote_id=vote_record["id"])
+    return VoteResponse(success=True, vote_id=vote.id)
+
+
+@router.get("/votes")
+async def get_votes(db: Session = Depends(get_db)):
+    """Dev endpoint — see all recorded votes."""
+    votes = db.query(VoteRecord).order_by(VoteRecord.id).all()
+    return {
+        "total": len(votes),
+        "votes": [
+            {
+                "id": vote.id,
+                "movieA": vote.movie_a_id,
+                "movieB": vote.movie_b_id,
+                "choice": vote.choice,
+            }
+            for vote in votes
+        ],
+    }
